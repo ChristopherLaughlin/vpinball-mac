@@ -8,10 +8,12 @@
     <string>VPinballX_BGFX</string>
     <key>CFBundleIdentifier</key>
     <string>org.vpinball.VPinballX_BGFX</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
     <key>CFBundleName</key>
-    <string>VPinballX_BGFX</string>
+    <string>VPinballX</string>
+    <key>CFBundleDisplayName</key>
+    <string>VPinballX</string>
     <key>CFBundleIconFile</key>
     <string>VPinballX.icns</string>
     <key>CFBundlePackageType</key>
@@ -20,26 +22,60 @@
     <string></string>
     <key>CFBundleVersion</key>
     <string></string>
-	<key>CFBundleSupportedPlatforms</key>
-	<array>
-		<string>MacOSX</string>
-	</array>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>MacOSX</string>
+    </array>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
     <key>CFBundleDocumentTypes</key>
     <array>
-       <dict>
-          <key>CFBundleTypeExtensions</key> 
-          <array>
-             <string>vpx</string>
-          </array>
-          <key>CFBundleTypeName</key>
-          <string>Visual Pinball X Table</string>
-          <key>CFBundleTypeRole</key>
-          <string>Viewer</string>
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>vpx</string>
+            </array>
+            <key>CFBundleTypeName</key>
+            <string>Visual Pinball X Table</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleTypeIconFile</key>
+            <string>VPinballX.icns</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.vpinball.vpx</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>org.vpinball.vpx</string>
+            <key>UTTypeDescription</key>
+            <string>Visual Pinball X Table</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>vpx</string>
+                </array>
+            </dict>
         </dict>
     </array>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.games</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
 </dict>
 </plist>

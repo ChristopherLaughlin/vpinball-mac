@@ -107,6 +107,7 @@ target_link_libraries(vpinball PUBLIC
    hidapi
    winevbs
    "-framework AppKit"
+   "-framework UniformTypeIdentifiers"
 )
 
 set_target_properties(vpinball PROPERTIES
