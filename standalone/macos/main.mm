@@ -9,7 +9,60 @@ extern "C" int WinMain(void*, void*, void*, int);
 static const NSInteger kMaxRecentFiles = 10;
 static NSString* const kRecentFilesKey = @"VPXRecentFiles";
 static NSString* const kLastOpenDirKey = @"VPXLastOpenDir";
-static NSString* const kWindowFrameKey = @"VPXMainWindowFrame";
+static NSString* const kTablesDirKey = @"VPXTablesDir";
+static NSString* const kPerformanceTunedKey = @"VPXPerformanceTuned";
+
+static void ApplyMacPerformanceDefaults()
+{
+   if ([[NSUserDefaults standardUserDefaults] boolForKey:kPerformanceTunedKey])
+      return;
+
+   NSString* iniDir = [@"~/Library/Application Support/VPinballX/10.8" stringByExpandingTildeInPath];
+   NSString* iniPath = [iniDir stringByAppendingPathComponent:@"VPinballX.ini"];
+
+   [[NSFileManager defaultManager] createDirectoryAtPath:iniDir
+                             withIntermediateDirectories:YES
+                                              attributes:nil
+                                                   error:nil];
+
+   NSMutableString* ini = nil;
+   if ([[NSFileManager defaultManager] fileExistsAtPath:iniPath]) {
+      ini = [NSMutableString stringWithContentsOfFile:iniPath encoding:NSUTF8StringEncoding error:nil];
+   }
+
+   if (!ini)
+      ini = [NSMutableString string];
+
+   auto setSetting = [&](NSString* section, NSString* key, NSString* value, NSString* comment) {
+      NSString* keyPattern = [NSString stringWithFormat:@"\n%@ = ", key];
+      if ([ini rangeOfString:keyPattern].location != NSNotFound)
+         return;
+
+      NSString* sectionHeader = [NSString stringWithFormat:@"[%@]", section];
+      NSRange sectionRange = [ini rangeOfString:sectionHeader];
+      if (sectionRange.location == NSNotFound) {
+         [ini appendFormat:@"\n\n[%@]\n", section];
+         sectionRange = [ini rangeOfString:sectionHeader];
+      }
+
+      NSUInteger insertPoint = sectionRange.location + sectionRange.length;
+      NSString* entry = [NSString stringWithFormat:@"\n; %@ [macOS optimized]\n%@ = %@\n", comment, key, value];
+      [ini insertString:entry atIndex:insertPoint];
+   };
+
+   setSetting(@"Player", @"PFReflection", @"3", @"Reflection Quality: Static & Balls for better FPS on Mac GPU");
+   setSetting(@"Player", @"DynamicAO", @"0", @"Dynamic Ambient Occlusion: disabled for better FPS");
+   setSetting(@"Player", @"FXAA", @"1", @"Post-processed AA: Fast FXAA");
+   setSetting(@"Player", @"MaxPrerenderedFrames", @"2", @"GPU frames in flight: 2 for better throughput");
+   setSetting(@"Player", @"ForceBloomOff", @"1", @"Disable bloom filter for performance");
+   setSetting(@"Player", @"MaxTexDimension", @"4096", @"Max texture size: 4096 is sufficient for Retina display");
+   setSetting(@"Player", @"ShowFPS", @"1", @"Show FPS counter");
+
+   [ini writeToFile:iniPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+   [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kPerformanceTunedKey];
+   printf("macOS performance defaults applied to %s\n", [iniPath UTF8String]);
+}
 
 void OnSignalHandler(int signum)
 {
@@ -40,27 +93,406 @@ static void AddToRecentFiles(NSString* path)
    SaveRecentFiles(recent);
 }
 
-#pragma mark - App Delegate
+static NSString* GetTablesDirectory()
+{
+   NSString* dir = [[NSUserDefaults standardUserDefaults] stringForKey:kTablesDirKey];
+   if (dir && [[NSFileManager defaultManager] fileExistsAtPath:dir])
+      return dir;
+   return [@"~/Documents" stringByExpandingTildeInPath];
+}
+
+#pragma mark - Table Library Window
+
+@interface VPXTableItem : NSObject
+@property (nonatomic, copy) NSString* path;
+@property (nonatomic, copy) NSString* name;
+@property (nonatomic, copy) NSString* size;
+@property (nonatomic, copy) NSString* modified;
+@end
+
+@implementation VPXTableItem
+@end
 
 @interface VPXAppDelegate : NSObject <NSApplicationDelegate>
+- (void)launchWithFile:(NSString*)path;
+@end
+
+@interface VPXTableLibrary : NSObject <NSTableViewDataSource, NSTableViewDelegate>
+@property (nonatomic, strong) NSWindow* window;
+@property (nonatomic, strong) NSTableView* tableView;
+@property (nonatomic, strong) NSTextField* statusLabel;
+@property (nonatomic, strong) NSTextField* searchField;
+@property (nonatomic, strong) NSMutableArray<VPXTableItem*>* allTables;
+@property (nonatomic, strong) NSMutableArray<VPXTableItem*>* filteredTables;
+@property (nonatomic, assign) VPXAppDelegate* delegate;
+@property (nonatomic, copy) NSString* currentDirectory;
+
+- (void)show;
+- (void)scanDirectory:(NSString*)directory;
+@end
+
+@implementation VPXTableLibrary
+
+- (instancetype)init
+{
+   self = [super init];
+   if (self) {
+      _allTables = [NSMutableArray array];
+      _filteredTables = [NSMutableArray array];
+      _currentDirectory = GetTablesDirectory();
+      [self createWindow];
+   }
+   return self;
+}
+
+- (void)createWindow
+{
+   NSRect frame = NSMakeRect(0, 0, 700, 500);
+   self.window = [[NSWindow alloc] initWithContentRect:frame
+                                             styleMask:NSWindowStyleMaskTitled |
+                                                       NSWindowStyleMaskClosable |
+                                                       NSWindowStyleMaskResizable |
+                                                       NSWindowStyleMaskMiniaturizable
+                                               backing:NSBackingStoreBuffered
+                                                 defer:NO];
+   self.window.title = @"VPinballX — Table Library";
+   self.window.minSize = NSMakeSize(500, 350);
+   [self.window center];
+
+   NSView* contentView = self.window.contentView;
+
+   // Toolbar area: search + buttons
+   NSView* toolbar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 700, 44)];
+   toolbar.translatesAutoresizingMaskIntoConstraints = NO;
+   [contentView addSubview:toolbar];
+
+   // Search field
+   self.searchField = [[NSTextField alloc] initWithFrame:NSZeroRect];
+   self.searchField.placeholderString = @"Filter tables...";
+   self.searchField.translatesAutoresizingMaskIntoConstraints = NO;
+   self.searchField.bezelStyle = NSTextFieldRoundedBezel;
+   self.searchField.target = self;
+   self.searchField.action = @selector(filterChanged:);
+   [toolbar addSubview:self.searchField];
+
+   // Change folder button
+   NSButton* folderBtn = [NSButton buttonWithTitle:@"Change Folder..."
+                                            target:self
+                                            action:@selector(chooseFolder:)];
+   folderBtn.translatesAutoresizingMaskIntoConstraints = NO;
+   folderBtn.bezelStyle = NSBezelStyleAccessoryBarAction;
+   [toolbar addSubview:folderBtn];
+
+   // Browse button
+   NSButton* browseBtn = [NSButton buttonWithTitle:@"Browse..."
+                                            target:self
+                                            action:@selector(browseForTable:)];
+   browseBtn.translatesAutoresizingMaskIntoConstraints = NO;
+   browseBtn.bezelStyle = NSBezelStyleAccessoryBarAction;
+   [toolbar addSubview:browseBtn];
+
+   // Scroll view + table view
+   NSScrollView* scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+   scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+   scrollView.hasVerticalScroller = YES;
+   scrollView.borderType = NSBezelBorder;
+   [contentView addSubview:scrollView];
+
+   self.tableView = [[NSTableView alloc] initWithFrame:NSZeroRect];
+   self.tableView.dataSource = self;
+   self.tableView.delegate = self;
+   self.tableView.doubleAction = @selector(playSelected:);
+   self.tableView.target = self;
+   self.tableView.rowHeight = 28;
+   self.tableView.usesAlternatingRowBackgroundColors = YES;
+   self.tableView.columnAutoresizingStyle = NSTableViewFirstColumnOnlyAutoresizingStyle;
+
+   NSTableColumn* nameCol = [[NSTableColumn alloc] initWithIdentifier:@"name"];
+   nameCol.title = @"Table Name";
+   nameCol.width = 350;
+   nameCol.minWidth = 200;
+   nameCol.sortDescriptorPrototype = [NSSortDescriptor sortDescriptorWithKey:@"name"
+                                                                   ascending:YES
+                                                                    selector:@selector(localizedCaseInsensitiveCompare:)];
+   [self.tableView addTableColumn:nameCol];
+
+   NSTableColumn* sizeCol = [[NSTableColumn alloc] initWithIdentifier:@"size"];
+   sizeCol.title = @"Size";
+   sizeCol.width = 80;
+   sizeCol.minWidth = 60;
+   [self.tableView addTableColumn:sizeCol];
+
+   NSTableColumn* modCol = [[NSTableColumn alloc] initWithIdentifier:@"modified"];
+   modCol.title = @"Modified";
+   modCol.width = 140;
+   modCol.minWidth = 100;
+   modCol.sortDescriptorPrototype = [NSSortDescriptor sortDescriptorWithKey:@"modified"
+                                                                  ascending:NO
+                                                                   selector:@selector(compare:)];
+   [self.tableView addTableColumn:modCol];
+
+   scrollView.documentView = self.tableView;
+
+   // Status bar
+   self.statusLabel = [NSTextField labelWithString:@""];
+   self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+   self.statusLabel.font = [NSFont systemFontOfSize:11];
+   self.statusLabel.textColor = [NSColor secondaryLabelColor];
+   [contentView addSubview:self.statusLabel];
+
+   // Play button
+   NSButton* playBtn = [NSButton buttonWithTitle:@"Play"
+                                          target:self
+                                          action:@selector(playSelected:)];
+   playBtn.translatesAutoresizingMaskIntoConstraints = NO;
+   playBtn.bezelStyle = NSBezelStyleAccessoryBarAction;
+   playBtn.keyEquivalent = @"\r";
+   [contentView addSubview:playBtn];
+
+   // Layout
+   [NSLayoutConstraint activateConstraints:@[
+      [toolbar.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:8],
+      [toolbar.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:12],
+      [toolbar.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-12],
+      [toolbar.heightAnchor constraintEqualToConstant:30],
+
+      [self.searchField.leadingAnchor constraintEqualToAnchor:toolbar.leadingAnchor],
+      [self.searchField.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
+      [self.searchField.widthAnchor constraintGreaterThanOrEqualToConstant:200],
+
+      [browseBtn.trailingAnchor constraintEqualToAnchor:toolbar.trailingAnchor],
+      [browseBtn.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
+
+      [folderBtn.trailingAnchor constraintEqualToAnchor:browseBtn.leadingAnchor constant:-8],
+      [folderBtn.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
+
+      [self.searchField.trailingAnchor constraintLessThanOrEqualToAnchor:folderBtn.leadingAnchor constant:-12],
+
+      [scrollView.topAnchor constraintEqualToAnchor:toolbar.bottomAnchor constant:8],
+      [scrollView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:12],
+      [scrollView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-12],
+      [scrollView.bottomAnchor constraintEqualToAnchor:self.statusLabel.topAnchor constant:-8],
+
+      [self.statusLabel.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:16],
+      [self.statusLabel.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-10],
+
+      [playBtn.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-16],
+      [playBtn.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-6],
+   ]];
+
+   // Recent tables section header
+   [self scanDirectory:self.currentDirectory];
+}
+
+- (void)show
+{
+   [self.window makeKeyAndOrderFront:nil];
+   [NSApp activateIgnoringOtherApps:YES];
+}
+
+#pragma mark - Directory Scanning
+
+- (void)scanDirectory:(NSString*)directory
+{
+   self.currentDirectory = directory;
+   [self.allTables removeAllObjects];
+
+   NSFileManager* fm = [NSFileManager defaultManager];
+   NSDateFormatter* dateFmt = [[NSDateFormatter alloc] init];
+   dateFmt.dateStyle = NSDateFormatterMediumStyle;
+   dateFmt.timeStyle = NSDateFormatterShortStyle;
+
+   NSDirectoryEnumerator* enumerator = [fm enumeratorAtPath:directory];
+   NSString* file;
+   while ((file = [enumerator nextObject])) {
+      if ([[file.lowercaseString pathExtension] isEqualToString:@"vpx"]) {
+         [enumerator skipDescendants];
+         NSString* fullPath = [directory stringByAppendingPathComponent:file];
+         NSDictionary* attrs = [fm attributesOfItemAtPath:fullPath error:nil];
+
+         VPXTableItem* item = [[VPXTableItem alloc] init];
+         item.path = fullPath;
+         item.name = [file stringByDeletingPathExtension];
+
+         unsigned long long bytes = [attrs fileSize];
+         if (bytes > 1024 * 1024 * 1024)
+            item.size = [NSString stringWithFormat:@"%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
+         else if (bytes > 1024 * 1024)
+            item.size = [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];
+         else
+            item.size = [NSString stringWithFormat:@"%.0f KB", bytes / 1024.0];
+
+         NSDate* modDate = [attrs fileModificationDate];
+         item.modified = modDate ? [dateFmt stringFromDate:modDate] : @"";
+
+         [self.allTables addObject:item];
+      }
+   }
+
+   [self.allTables sortUsingComparator:^NSComparisonResult(VPXTableItem* a, VPXTableItem* b) {
+      return [a.name localizedCaseInsensitiveCompare:b.name];
+   }];
+
+   [self applyFilter];
+}
+
+- (void)applyFilter
+{
+   NSString* query = self.searchField.stringValue;
+   [self.filteredTables removeAllObjects];
+
+   if (query.length == 0) {
+      [self.filteredTables addObjectsFromArray:self.allTables];
+   } else {
+      for (VPXTableItem* item in self.allTables) {
+         if ([item.name rangeOfString:query options:NSCaseInsensitiveSearch].location != NSNotFound)
+            [self.filteredTables addObject:item];
+      }
+   }
+
+   [self.tableView reloadData];
+
+   NSString* dirName = [self.currentDirectory lastPathComponent];
+   self.statusLabel.stringValue = [NSString stringWithFormat:@"%ld table%s in %@",
+                                   (long)self.filteredTables.count,
+                                   self.filteredTables.count == 1 ? "" : "s",
+                                   dirName];
+}
+
+#pragma mark - Actions
+
+- (void)filterChanged:(id)sender
+{
+   [self applyFilter];
+}
+
+- (void)chooseFolder:(id)sender
+{
+   NSOpenPanel* panel = [NSOpenPanel openPanel];
+   panel.message = @"Choose your tables folder";
+   panel.canChooseDirectories = YES;
+   panel.canChooseFiles = NO;
+   panel.allowsMultipleSelection = NO;
+   panel.directoryURL = [NSURL fileURLWithPath:self.currentDirectory];
+
+   [panel beginSheetModalForWindow:self.window completionHandler:^(NSInteger result) {
+      if (result == NSModalResponseOK) {
+         NSString* path = [panel.URL path];
+         [[NSUserDefaults standardUserDefaults] setObject:path forKey:kTablesDirKey];
+         [self scanDirectory:path];
+      }
+   }];
+}
+
+- (void)browseForTable:(id)sender
+{
+   NSOpenPanel* panel = [NSOpenPanel openPanel];
+   panel.message = @"Select a Visual Pinball Table";
+   panel.allowsMultipleSelection = NO;
+   panel.canChooseDirectories = NO;
+   panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"vpx"]];
+
+   NSString* lastDir = [[NSUserDefaults standardUserDefaults] stringForKey:kLastOpenDirKey];
+   if (lastDir)
+      panel.directoryURL = [NSURL fileURLWithPath:lastDir];
+
+   [panel beginSheetModalForWindow:self.window completionHandler:^(NSInteger result) {
+      if (result == NSModalResponseOK) {
+         NSURL* fileURL = panel.URLs[0];
+         NSString* path = [NSString stringWithUTF8String:[fileURL fileSystemRepresentation]];
+         [[NSUserDefaults standardUserDefaults] setObject:[path stringByDeletingLastPathComponent] forKey:kLastOpenDirKey];
+         [self.window close];
+         [self.delegate launchWithFile:path];
+      }
+   }];
+}
+
+- (void)playSelected:(id)sender
+{
+   NSInteger row = self.tableView.selectedRow;
+   if (row < 0 || row >= (NSInteger)self.filteredTables.count)
+      return;
+
+   VPXTableItem* item = self.filteredTables[row];
+   [self.window close];
+   [self.delegate launchWithFile:item.path];
+}
+
+#pragma mark - NSTableViewDataSource
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView*)tableView
+{
+   return self.filteredTables.count;
+}
+
+#pragma mark - NSTableViewDelegate
+
+- (NSView*)tableView:(NSTableView*)tableView viewForTableColumn:(NSTableColumn*)tableColumn row:(NSInteger)row
+{
+   NSString* identifier = tableColumn.identifier;
+   NSTableCellView* cell = [tableView makeViewWithIdentifier:identifier owner:self];
+
+   if (!cell) {
+      cell = [[NSTableCellView alloc] init];
+      cell.identifier = identifier;
+      NSTextField* tf = [NSTextField labelWithString:@""];
+      tf.translatesAutoresizingMaskIntoConstraints = NO;
+      tf.lineBreakMode = NSLineBreakByTruncatingTail;
+      [cell addSubview:tf];
+      cell.textField = tf;
+      [NSLayoutConstraint activateConstraints:@[
+         [tf.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:4],
+         [tf.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-4],
+         [tf.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+      ]];
+   }
+
+   VPXTableItem* item = self.filteredTables[row];
+
+   if ([identifier isEqualToString:@"name"]) {
+      cell.textField.stringValue = item.name;
+      cell.textField.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+      cell.toolTip = item.path;
+   } else if ([identifier isEqualToString:@"size"]) {
+      cell.textField.stringValue = item.size;
+      cell.textField.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+      cell.textField.textColor = [NSColor secondaryLabelColor];
+   } else if ([identifier isEqualToString:@"modified"]) {
+      cell.textField.stringValue = item.modified;
+      cell.textField.font = [NSFont systemFontOfSize:11];
+      cell.textField.textColor = [NSColor secondaryLabelColor];
+   }
+
+   return cell;
+}
+
+- (void)tableView:(NSTableView*)tableView sortDescriptorsDidChange:(NSArray<NSSortDescriptor*>*)oldDescriptors
+{
+   [self.filteredTables sortUsingDescriptors:tableView.sortDescriptors];
+   [tableView reloadData];
+}
+
+@end
+
+#pragma mark - App Delegate
+
+@interface VPXAppDelegate ()
 @property (nonatomic, strong) NSMenu* recentFilesMenu;
 @property (nonatomic, strong) NSMenu* dockMenu;
+@property (nonatomic, strong) VPXTableLibrary* tableLibrary;
 @property (nonatomic, copy) NSString* currentTablePath;
-- (void)launchWithFile:(NSString*)path;
-- (void)openDocument:(id)sender;
-- (void)openRecentFile:(id)sender;
-- (void)clearRecentFiles:(id)sender;
 @end
 
 @implementation VPXAppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification
 {
+   ApplyMacPerformanceDefaults();
    [self setupMenuBar];
    [self setupDockMenu];
 
    if (g_argc == 1) {
-      [self showOpenPanel];
+      [self showTableLibrary];
    } else {
       for (int i = 1; i < g_argc; i++) {
          if (strcmp(g_argv[i], "-play") == 0 && i + 1 < g_argc) {
@@ -74,6 +506,15 @@ static void AddToRecentFiles(NSString* path)
       [self rebuildDockMenu];
       [self launchEngine];
    }
+}
+
+- (void)showTableLibrary
+{
+   if (!self.tableLibrary) {
+      self.tableLibrary = [[VPXTableLibrary alloc] init];
+      self.tableLibrary.delegate = self;
+   }
+   [self.tableLibrary show];
 }
 
 #pragma mark - Menu Bar
@@ -99,6 +540,7 @@ static void AddToRecentFiles(NSString* path)
    // File menu
    NSMenuItem* fileMenuItem = [[NSMenuItem alloc] init];
    NSMenu* fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
+   [fileMenu addItemWithTitle:@"Table Library" action:@selector(showTableLibrary) keyEquivalent:@"l"];
    [fileMenu addItemWithTitle:@"Open Table..." action:@selector(openDocument:) keyEquivalent:@"o"];
 
    NSMenuItem* recentMenuItem = [[NSMenuItem alloc] initWithTitle:@"Open Recent" action:nil keyEquivalent:@""];
@@ -164,6 +606,7 @@ static void AddToRecentFiles(NSString* path)
 {
    [self.dockMenu removeAllItems];
 
+   [self.dockMenu addItemWithTitle:@"Table Library" action:@selector(showTableLibrary) keyEquivalent:@""];
    [self.dockMenu addItemWithTitle:@"Open Table..." action:@selector(openDocument:) keyEquivalent:@""];
 
    NSArray<NSString*>* recent = LoadRecentFiles();
@@ -235,8 +678,6 @@ static void AddToRecentFiles(NSString* path)
          NSString* path = [NSString stringWithUTF8String:[fileURL fileSystemRepresentation]];
          [[NSUserDefaults standardUserDefaults] setObject:[path stringByDeletingLastPathComponent] forKey:kLastOpenDirKey];
          [self launchWithFile:path];
-      } else {
-         exit(0);
       }
    }];
 }
