@@ -10,7 +10,7 @@ static const NSInteger kMaxRecentFiles = 10;
 static NSString* const kRecentFilesKey = @"VPXRecentFiles";
 static NSString* const kLastOpenDirKey = @"VPXLastOpenDir";
 static NSString* const kTablesDirKey = @"VPXTablesDir";
-static NSString* const kPerformanceTunedKey = @"VPXPerformanceTuned";
+static NSString* const kPerformanceTunedKey = @"VPXPerformanceTuned_v2";
 
 static void ApplyMacPerformanceDefaults()
 {
@@ -26,8 +26,15 @@ static void ApplyMacPerformanceDefaults()
                                                    error:nil];
 
    NSMutableString* ini = nil;
-   if ([[NSFileManager defaultManager] fileExistsAtPath:iniPath]) {
-      ini = [NSMutableString stringWithContentsOfFile:iniPath encoding:NSUTF8StringEncoding error:nil];
+   BOOL fileExists = [[NSFileManager defaultManager] fileExistsAtPath:iniPath];
+   if (fileExists) {
+      NSError* readError = nil;
+      ini = [NSMutableString stringWithContentsOfFile:iniPath encoding:NSUTF8StringEncoding error:&readError];
+      if (!ini) {
+         printf("Warning: could not read existing INI (%s), skipping performance tuning\n",
+                [[readError localizedDescription] UTF8String]);
+         return;
+      }
    }
 
    if (!ini)
@@ -35,7 +42,7 @@ static void ApplyMacPerformanceDefaults()
 
    auto setSetting = [&](NSString* section, NSString* key, NSString* value, NSString* comment) {
       NSString* keyPattern = [NSString stringWithFormat:@"\n%@ = ", key];
-      if ([ini rangeOfString:keyPattern].location != NSNotFound)
+      if ([ini rangeOfString:keyPattern options:NSCaseInsensitiveSearch].location != NSNotFound)
          return;
 
       NSString* sectionHeader = [NSString stringWithFormat:@"[%@]", section];
@@ -50,13 +57,12 @@ static void ApplyMacPerformanceDefaults()
       [ini insertString:entry atIndex:insertPoint];
    };
 
-   setSetting(@"Player", @"PFReflection", @"3", @"Reflection Quality: Static & Balls for better FPS on Mac GPU");
-   setSetting(@"Player", @"DynamicAO", @"0", @"Dynamic Ambient Occlusion: disabled for better FPS");
+   setSetting(@"Player", @"PFReflection", @"3", @"Reflection: Static & Balls for better FPS");
+   setSetting(@"Player", @"DynamicAO", @"0", @"Dynamic AO: disabled for better FPS");
    setSetting(@"Player", @"FXAA", @"1", @"Post-processed AA: Fast FXAA");
-   setSetting(@"Player", @"MaxPrerenderedFrames", @"2", @"GPU frames in flight: 2 for better throughput");
-   setSetting(@"Player", @"ForceBloomOff", @"1", @"Disable bloom filter for performance");
-   setSetting(@"Player", @"MaxTexDimension", @"4096", @"Max texture size: 4096 is sufficient for Retina display");
-   setSetting(@"Player", @"ShowFPS", @"1", @"Show FPS counter");
+   setSetting(@"Player", @"MaxPrerenderedFrames", @"1", @"Prerender frames: 1 (Metal ignores >1, avoids wrong latency compensation)");
+   setSetting(@"Player", @"MaxTexDimension", @"0", @"Texture size: unlimited (Apple unified memory has no VRAM bottleneck)");
+   setSetting(@"Player", @"CompressTextures", @"1", @"BC texture compression: 4-8x bandwidth reduction on Apple Silicon");
 
    [ini writeToFile:iniPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
 
@@ -295,45 +301,52 @@ static NSString* GetTablesDirectory()
 - (void)scanDirectory:(NSString*)directory
 {
    self.currentDirectory = directory;
-   [self.allTables removeAllObjects];
+   self.statusLabel.stringValue = @"Scanning...";
 
-   NSFileManager* fm = [NSFileManager defaultManager];
-   NSDateFormatter* dateFmt = [[NSDateFormatter alloc] init];
-   dateFmt.dateStyle = NSDateFormatterMediumStyle;
-   dateFmt.timeStyle = NSDateFormatterShortStyle;
+   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      NSMutableArray<VPXTableItem*>* tables = [NSMutableArray array];
+      NSFileManager* fm = [NSFileManager defaultManager];
+      NSDateFormatter* dateFmt = [[NSDateFormatter alloc] init];
+      dateFmt.dateStyle = NSDateFormatterMediumStyle;
+      dateFmt.timeStyle = NSDateFormatterShortStyle;
 
-   NSDirectoryEnumerator* enumerator = [fm enumeratorAtPath:directory];
-   NSString* file;
-   while ((file = [enumerator nextObject])) {
-      if ([[file.lowercaseString pathExtension] isEqualToString:@"vpx"]) {
-         [enumerator skipDescendants];
-         NSString* fullPath = [directory stringByAppendingPathComponent:file];
-         NSDictionary* attrs = [fm attributesOfItemAtPath:fullPath error:nil];
+      NSDirectoryEnumerator* enumerator = [fm enumeratorAtPath:directory];
+      NSString* file;
+      while ((file = [enumerator nextObject])) {
+         if ([[file.lowercaseString pathExtension] isEqualToString:@"vpx"]) {
+            [enumerator skipDescendants];
+            NSString* fullPath = [directory stringByAppendingPathComponent:file];
+            NSDictionary* attrs = [fm attributesOfItemAtPath:fullPath error:nil];
 
-         VPXTableItem* item = [[VPXTableItem alloc] init];
-         item.path = fullPath;
-         item.name = [file stringByDeletingPathExtension];
+            VPXTableItem* item = [[VPXTableItem alloc] init];
+            item.path = fullPath;
+            item.name = [file stringByDeletingPathExtension];
 
-         unsigned long long bytes = [attrs fileSize];
-         if (bytes > 1024 * 1024 * 1024)
-            item.size = [NSString stringWithFormat:@"%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
-         else if (bytes > 1024 * 1024)
-            item.size = [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];
-         else
-            item.size = [NSString stringWithFormat:@"%.0f KB", bytes / 1024.0];
+            unsigned long long bytes = [attrs fileSize];
+            if (bytes > 1024 * 1024 * 1024)
+               item.size = [NSString stringWithFormat:@"%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
+            else if (bytes > 1024 * 1024)
+               item.size = [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];
+            else
+               item.size = [NSString stringWithFormat:@"%.0f KB", bytes / 1024.0];
 
-         NSDate* modDate = [attrs fileModificationDate];
-         item.modified = modDate ? [dateFmt stringFromDate:modDate] : @"";
+            NSDate* modDate = [attrs fileModificationDate];
+            item.modified = modDate ? [dateFmt stringFromDate:modDate] : @"";
 
-         [self.allTables addObject:item];
+            [tables addObject:item];
+         }
       }
-   }
 
-   [self.allTables sortUsingComparator:^NSComparisonResult(VPXTableItem* a, VPXTableItem* b) {
-      return [a.name localizedCaseInsensitiveCompare:b.name];
-   }];
+      [tables sortUsingComparator:^NSComparisonResult(VPXTableItem* a, VPXTableItem* b) {
+         return [a.name localizedCaseInsensitiveCompare:b.name];
+      }];
 
-   [self applyFilter];
+      dispatch_async(dispatch_get_main_queue(), ^{
+         [self.allTables removeAllObjects];
+         [self.allTables addObjectsFromArray:tables];
+         [self applyFilter];
+      });
+   });
 }
 
 - (void)applyFilter

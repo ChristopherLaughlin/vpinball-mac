@@ -14,12 +14,12 @@ string(REGEX MATCH "VP_VERSION_REV[ ]+([0-9]+)" _tmp ${version})
 set(VERSION_REV "${CMAKE_MATCH_1}")
 set(APP_NAME "VPinballX_BGFX")
 
+set(CMAKE_OSX_DEPLOYMENT_TARGET 14.0)
+set(CMAKE_OSX_ARCHITECTURES x86_64)
+
 project(vpinball VERSION "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_REV}")
 
 include("${CMAKE_SOURCE_DIR}/make/CMakeLists_common_standalone.txt")
-
-set(CMAKE_OSX_DEPLOYMENT_TARGET 14.0)
-set(CMAKE_OSX_ARCHITECTURES x86_64)
 
 set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 set(CMAKE_INSTALL_RPATH "@executable_path/../Frameworks")

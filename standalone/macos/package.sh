@@ -43,13 +43,20 @@ cmd_build() {
 cmd_sign() {
     echo "==> Ad-hoc signing $APP_NAME.app..."
 
-    # Sign all dylibs in Frameworks first
+    # Fix dylib install names to use @rpath
     find "$APP_BUNDLE/Contents/Frameworks" -name "*.dylib" 2>/dev/null | while read -r lib; do
+        local libname
+        libname=$(basename "$lib")
+        install_name_tool -id "@rpath/$libname" "$lib" 2>/dev/null || true
+    done
+
+    # Sign all dylibs, .so, and .bundle in Frameworks
+    find "$APP_BUNDLE/Contents/Frameworks" \( -name "*.dylib" -o -name "*.so" -o -name "*.bundle" \) 2>/dev/null | while read -r lib; do
         codesign --force --sign - "$lib"
     done
 
-    # Sign all plugin dylibs
-    find "$APP_BUNDLE/Contents/Resources/plugins" -name "*.dylib" 2>/dev/null | while read -r lib; do
+    # Sign all plugin libraries
+    find "$APP_BUNDLE/Contents/Resources/plugins" \( -name "*.dylib" -o -name "*.so" -o -name "*.bundle" \) 2>/dev/null | while read -r lib; do
         codesign --force --sign - "$lib"
     done
 
@@ -79,11 +86,18 @@ cmd_sign_dev() {
 
     echo "==> Signing with: $SIGNING_IDENTITY"
 
+    # Fix dylib install names to use @rpath
     find "$APP_BUNDLE/Contents/Frameworks" -name "*.dylib" 2>/dev/null | while read -r lib; do
+        local libname
+        libname=$(basename "$lib")
+        install_name_tool -id "@rpath/$libname" "$lib" 2>/dev/null || true
+    done
+
+    find "$APP_BUNDLE/Contents/Frameworks" \( -name "*.dylib" -o -name "*.so" -o -name "*.bundle" \) 2>/dev/null | while read -r lib; do
         codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$lib"
     done
 
-    find "$APP_BUNDLE/Contents/Resources/plugins" -name "*.dylib" 2>/dev/null | while read -r lib; do
+    find "$APP_BUNDLE/Contents/Resources/plugins" \( -name "*.dylib" -o -name "*.so" -o -name "*.bundle" \) 2>/dev/null | while read -r lib; do
         codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$lib"
     done
 
@@ -170,11 +184,27 @@ cmd_notarize() {
     fi
 
     echo "==> Submitting for notarization..."
-    xcrun notarytool submit "$DMG_PATH" \
+    local notarize_output
+    notarize_output=$(xcrun notarytool submit "$DMG_PATH" \
         --apple-id "$APPLE_ID" \
         --team-id "$TEAM_ID" \
         --password "$APP_PASSWORD" \
-        --wait
+        --wait 2>&1)
+    echo "$notarize_output"
+
+    if echo "$notarize_output" | grep -q "status: Invalid"; then
+        echo "Error: Notarization failed. Check the log above for details."
+        local submission_id
+        submission_id=$(echo "$notarize_output" | grep -oE 'id: [0-9a-f-]+' | head -1 | cut -d' ' -f2)
+        if [ -n "$submission_id" ]; then
+            echo "==> Fetching notarization log..."
+            xcrun notarytool log "$submission_id" \
+                --apple-id "$APPLE_ID" \
+                --team-id "$TEAM_ID" \
+                --password "$APP_PASSWORD"
+        fi
+        exit 1
+    fi
 
     echo "==> Stapling notarization ticket..."
     xcrun stapler staple "$DMG_PATH"
