@@ -209,8 +209,9 @@ extern "C" int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, 
       }
 
       // Run the application
-      if (cmdLine.m_command)
+      if (cmdLine.m_command) {
          cmdLine.m_command->Execute();
+      }
    }
 
    // catch all CException types

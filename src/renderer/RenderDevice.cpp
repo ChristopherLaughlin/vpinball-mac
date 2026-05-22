@@ -381,7 +381,8 @@ void RenderDevice::RenderThread(RenderDevice* rd, bgfx::Init init)
    // We first run in headless mode to initialize the underlying backend and try to gather information to select a supported backbuffer format
    // This is needed to select a safe backbuffer format but will fail under OpenGL or Linux. For these, we start using BGRA8 which seems to be supported everywhere and adjust afterward
    init.resolution.formatColor = bgfx::TextureFormat::BGRA8;
-   if (init.platformData.nwh && init.type != bgfx::RendererType::OpenGL && init.type != bgfx::RendererType::OpenGLES && init.type != bgfx::RendererType::Direct3D12)
+   if (init.platformData.nwh && init.type != bgfx::RendererType::OpenGL && init.type != bgfx::RendererType::OpenGLES && init.type != bgfx::RendererType::Direct3D12
+      && init.type != bgfx::RendererType::Metal)
    {
       const uint32_t width = init.resolution.width;
       const uint32_t height = init.resolution.height;
@@ -1187,7 +1188,10 @@ RenderDevice::RenderDevice(
       init.platformData.nwh = SDL_GetPointerProperty(SDL_GetWindowProperties(swapchainWnd->GetCore()), SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);
    }
    #elif BX_PLATFORM_OSX
-   init.platformData.nwh = SDL_GetRenderMetalLayer(SDL_CreateRenderer(swapchainWnd->GetCore(), "Metal"));
+   {
+      SDL_Renderer* renderer = SDL_CreateRenderer(swapchainWnd->GetCore(), "Metal");
+      init.platformData.nwh = SDL_GetRenderMetalLayer(renderer);
+   }
    #elif BX_PLATFORM_IOS
    init.platformData.nwh = VPinballLib::VPinballLib::Instance().GetMetalLayer();
    #elif BX_PLATFORM_ANDROID

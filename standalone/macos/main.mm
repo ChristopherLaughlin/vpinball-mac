@@ -205,9 +205,11 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
 @property (nonatomic, strong) NSMutableArray<VPXTableItem*>* filteredTables;
 @property (nonatomic, weak) VPXAppDelegate* delegate;
 @property (nonatomic, copy) NSString* currentDirectory;
+@property (nonatomic, assign) BOOL cancelled;
 
 - (void)show;
 - (void)scanDirectory:(NSString*)directory;
+- (void)cancelLoading;
 @end
 
 @implementation VPXTableLibrary
@@ -392,6 +394,7 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
    self.currentDirectory = directory;
    self.statusLabel.stringValue = @"Scanning...";
 
+   __weak typeof(self) weakSelf = self;
    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
       NSMutableArray<VPXTableItem*>* tables = [NSMutableArray array];
       NSFileManager* fm = [NSFileManager defaultManager];
@@ -431,19 +434,31 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
       }];
 
       dispatch_async(dispatch_get_main_queue(), ^{
-         [self.allTables removeAllObjects];
-         [self.allTables addObjectsFromArray:tables];
-         [self applyFilter];
-         [self loadMetadataInBackground];
+         __strong typeof(weakSelf) strongSelf = weakSelf;
+         if (!strongSelf || strongSelf.cancelled)
+            return;
+         [strongSelf.allTables removeAllObjects];
+         [strongSelf.allTables addObjectsFromArray:tables];
+         [strongSelf applyFilter];
+         [strongSelf loadMetadataInBackground];
       });
    });
+}
+
+- (void)cancelLoading
+{
+   self.cancelled = YES;
 }
 
 - (void)loadMetadataInBackground
 {
    NSArray<VPXTableItem*>* snapshot = [self.allTables copy];
+   __weak typeof(self) weakSelf = self;
    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
       for (VPXTableItem* item in snapshot) {
+         if (weakSelf.cancelled)
+            return;
+
          POLE::Storage storage([item.path UTF8String]);
          if (!storage.open())
             continue;
@@ -462,14 +477,17 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
          thumb = ResizeToThumbnail(image);
 
          dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.cancelled)
+               return;
             if (author.length > 0) item.author = author;
             if (version.length > 0) item.version = version;
             if (tableName.length > 0) item.name = tableName;
             if (thumb) item.thumbnail = thumb;
-            NSInteger idx = [self.filteredTables indexOfObject:item];
+            NSInteger idx = [strongSelf.filteredTables indexOfObject:item];
             if (idx != NSNotFound) {
-               [self.tableView reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:idx]
-                                         columnIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, self.tableView.numberOfColumns)]];
+               [strongSelf.tableView reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:idx]
+                                               columnIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, strongSelf.tableView.numberOfColumns)]];
             }
          });
       }
@@ -542,6 +560,7 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
          NSURL* fileURL = panel.URLs[0];
          NSString* path = [NSString stringWithUTF8String:[fileURL fileSystemRepresentation]];
          [[NSUserDefaults standardUserDefaults] setObject:[path stringByDeletingLastPathComponent] forKey:kLastOpenDirKey];
+         [self cancelLoading];
          [self.window close];
          [self.delegate launchWithFile:path];
       }
@@ -555,6 +574,7 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
       return;
 
    VPXTableItem* item = self.filteredTables[row];
+   [self cancelLoading];
    [self.window close];
    [self.delegate launchWithFile:item.path];
 }
@@ -635,6 +655,7 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
 @property (nonatomic, strong) NSMenu* recentFilesMenu;
 @property (nonatomic, strong) NSMenu* dockMenu;
 @property (nonatomic, strong) VPXTableLibrary* tableLibrary;
+@property (nonatomic, assign) BOOL launchingEngine;
 @property (nonatomic, copy) NSString* currentTablePath;
 @end
 
@@ -849,6 +870,9 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
    [self rebuildRecentFilesMenu];
    [self rebuildDockMenu];
 
+   [self.tableLibrary cancelLoading];
+   self.tableLibrary = nil;
+
    char** new_argv = (char**)malloc(3 * sizeof(char*));
    new_argv[0] = g_argv[0];
    new_argv[1] = strdup("-play");
@@ -861,6 +885,7 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
 
 - (void)launchEngine
 {
+   self.launchingEngine = YES;
    int status = WinMain(NULL, NULL, NULL, 0);
    exit(status);
 }
@@ -963,7 +988,7 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender
 {
-   return YES;
+   return !self.launchingEngine;
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender

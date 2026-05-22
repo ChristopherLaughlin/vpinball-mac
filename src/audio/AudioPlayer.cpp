@@ -206,8 +206,9 @@ namespace VPX
 AudioPlayer::AudioPlayer(const string& backglassDevice, const string& playfieldDevice, SoundConfigTypes playfieldSoundMode)
    : m_soundMode3D(playfieldSoundMode)
 {
-   if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
+   if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
       return;
+   }
 
    {
       int count;
