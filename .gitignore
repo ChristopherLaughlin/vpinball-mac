@@ -10,7 +10,8 @@ build
 xcuserdata/
 fastlane/
 
-.github/workflows
+# .github/workflows — upstream ignores this, but our fork needs it
+!.github/workflows
 
 tmp
 

@@ -1,0 +1,53 @@
+name: Build macOS
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install autoconf automake libtool cmake bison curl
+
+      - name: Cache external libraries
+        id: cache-externals
+        uses: actions/cache@v4
+        with:
+          path: |
+            external/macos-arm64
+            third-party/build-libs/macos-arm64
+            third-party/runtime-libs/macos-arm64
+          key: externals-macos-arm64-${{ hashFiles('platforms/config.sh', 'platforms/macos-arm64/external.sh') }}
+
+      - name: Build external libraries
+        if: steps.cache-externals.outputs.cache-hit != 'true'
+        run: |
+          export PATH="$(brew --prefix bison)/bin:$PATH"
+          platforms/macos-arm64/external.sh
+
+      - name: Configure
+        run: |
+          cp make/CMakeLists_bgfx-macos-arm64.txt CMakeLists.txt
+          cmake -DCMAKE_BUILD_TYPE=Release -B build
+
+      - name: Build
+        run: cmake --build build -- -j$(sysctl -n hw.ncpu)
+
+      - name: Verify app bundle
+        run: |
+          test -f build/VPinballX_BGFX.app/Contents/MacOS/VPinballX_BGFX
+          codesign --force --sign - build/VPinballX_BGFX.app
+          echo "Build verified OK"
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: VPinballX-macOS-arm64
+          path: build/VPinballX_BGFX.app
+          retention-days: 14

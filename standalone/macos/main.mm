@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <csignal>
+#include "pole/pole.h"
 
 extern "C" char** g_argv;
 extern "C" int g_argc;
@@ -109,11 +110,86 @@ static NSString* GetTablesDirectory()
 
 #pragma mark - Table Library Window
 
+static NSImage* ResizeToThumbnail(NSImage* image)
+{
+   if (!image)
+      return nil;
+   NSSize thumbSize = NSMakeSize(80, 60);
+   NSImage* thumb = [[NSImage alloc] initWithSize:thumbSize];
+   [thumb lockFocus];
+   [[NSGraphicsContext currentContext] setImageInterpolation:NSImageInterpolationHigh];
+   [image drawInRect:NSMakeRect(0, 0, thumbSize.width, thumbSize.height)
+            fromRect:NSZeroRect
+           operation:NSCompositingOperationSourceOver
+            fraction:1.0];
+   [thumb unlockFocus];
+   return thumb;
+}
+
+static NSImage* ExtractImageFromStream(POLE::Storage& storage, const std::string& path)
+{
+   POLE::Stream stream(&storage, path);
+   if (stream.fail() || stream.size() == 0 || stream.size() > 10 * 1024 * 1024)
+      return nil;
+
+   std::vector<unsigned char> buf(stream.size());
+   uint64_t bytesRead = stream.read(buf.data(), stream.size());
+   if (bytesRead == 0)
+      return nil;
+
+   NSData* data = [NSData dataWithBytes:buf.data() length:bytesRead];
+   return [[NSImage alloc] initWithData:data];
+}
+
+static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& path)
+{
+   POLE::Stream stream(&storage, path);
+   if (stream.fail() || stream.size() < 16 || stream.size() > 50 * 1024 * 1024)
+      return nil;
+
+   std::vector<unsigned char> buf(stream.size());
+   stream.read(buf.data(), stream.size());
+
+   const unsigned char jpegMagic[] = {0xFF, 0xD8, 0xFF};
+   const unsigned char pngMagic[] = {0x89, 0x50, 0x4E, 0x47};
+   const unsigned char webpRiff[] = {0x52, 0x49, 0x46, 0x46};
+
+   for (size_t i = 0; i + 12 < buf.size(); i++) {
+      if (memcmp(&buf[i], jpegMagic, 3) == 0 ||
+          memcmp(&buf[i], pngMagic, 4) == 0 ||
+          (memcmp(&buf[i], webpRiff, 4) == 0 && memcmp(&buf[i+8], "WEBP", 4) == 0)) {
+         NSData* data = [NSData dataWithBytes:&buf[i] length:buf.size() - i];
+         NSImage* img = [[NSImage alloc] initWithData:data];
+         if (img)
+            return img;
+      }
+   }
+   return nil;
+}
+
+static NSImage* ExtractVPXThumbnail(NSString* vpxPath)
+{
+   POLE::Storage storage([vpxPath UTF8String]);
+   if (!storage.open())
+      return nil;
+
+   NSImage* image = ExtractImageFromStream(storage, "/GameStg/Screenshot");
+
+   for (int i = 0; !image && i < 5; i++) {
+      char path[64];
+      snprintf(path, sizeof(path), "/GameStg/Image%d", i);
+      image = ExtractImageFromBIFF(storage, path);
+   }
+
+   return ResizeToThumbnail(image);
+}
+
 @interface VPXTableItem : NSObject
 @property (nonatomic, copy) NSString* path;
 @property (nonatomic, copy) NSString* name;
 @property (nonatomic, copy) NSString* size;
 @property (nonatomic, copy) NSString* modified;
+@property (nonatomic, strong) NSImage* thumbnail;
 @end
 
 @implementation VPXTableItem
@@ -130,7 +206,7 @@ static NSString* GetTablesDirectory()
 @property (nonatomic, strong) NSTextField* searchField;
 @property (nonatomic, strong) NSMutableArray<VPXTableItem*>* allTables;
 @property (nonatomic, strong) NSMutableArray<VPXTableItem*>* filteredTables;
-@property (nonatomic, assign) VPXAppDelegate* delegate;
+@property (nonatomic, weak) VPXAppDelegate* delegate;
 @property (nonatomic, copy) NSString* currentDirectory;
 
 - (void)show;
@@ -209,13 +285,20 @@ static NSString* GetTablesDirectory()
    self.tableView.delegate = self;
    self.tableView.doubleAction = @selector(playSelected:);
    self.tableView.target = self;
-   self.tableView.rowHeight = 28;
+   self.tableView.rowHeight = 50;
    self.tableView.usesAlternatingRowBackgroundColors = YES;
    self.tableView.columnAutoresizingStyle = NSTableViewFirstColumnOnlyAutoresizingStyle;
 
+   NSTableColumn* thumbCol = [[NSTableColumn alloc] initWithIdentifier:@"thumbnail"];
+   thumbCol.title = @"";
+   thumbCol.width = 70;
+   thumbCol.minWidth = 70;
+   thumbCol.maxWidth = 70;
+   [self.tableView addTableColumn:thumbCol];
+
    NSTableColumn* nameCol = [[NSTableColumn alloc] initWithIdentifier:@"name"];
    nameCol.title = @"Table Name";
-   nameCol.width = 350;
+   nameCol.width = 300;
    nameCol.minWidth = 200;
    nameCol.sortDescriptorPrototype = [NSSortDescriptor sortDescriptorWithKey:@"name"
                                                                    ascending:YES
@@ -345,7 +428,28 @@ static NSString* GetTablesDirectory()
          [self.allTables removeAllObjects];
          [self.allTables addObjectsFromArray:tables];
          [self applyFilter];
+         [self loadThumbnailsInBackground];
       });
+   });
+}
+
+- (void)loadThumbnailsInBackground
+{
+   NSArray<VPXTableItem*>* snapshot = [self.allTables copy];
+   dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+      for (VPXTableItem* item in snapshot) {
+         NSImage* thumb = ExtractVPXThumbnail(item.path);
+         if (thumb) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+               item.thumbnail = thumb;
+               NSInteger idx = [self.filteredTables indexOfObject:item];
+               if (idx != NSNotFound) {
+                  [self.tableView reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:idx]
+                                           columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+               }
+            });
+         }
+      }
    });
 }
 
@@ -443,8 +547,20 @@ static NSString* GetTablesDirectory()
 - (NSView*)tableView:(NSTableView*)tableView viewForTableColumn:(NSTableColumn*)tableColumn row:(NSInteger)row
 {
    NSString* identifier = tableColumn.identifier;
-   NSTableCellView* cell = [tableView makeViewWithIdentifier:identifier owner:self];
+   VPXTableItem* item = self.filteredTables[row];
 
+   if ([identifier isEqualToString:@"thumbnail"]) {
+      NSImageView* iv = [tableView makeViewWithIdentifier:identifier owner:self];
+      if (!iv) {
+         iv = [NSImageView imageViewWithImage:[NSImage imageNamed:NSImageNameFolder]];
+         iv.identifier = identifier;
+         iv.imageScaling = NSImageScaleProportionallyUpOrDown;
+      }
+      iv.image = item.thumbnail ?: [NSImage imageNamed:NSImageNameFolder];
+      return iv;
+   }
+
+   NSTableCellView* cell = [tableView makeViewWithIdentifier:identifier owner:self];
    if (!cell) {
       cell = [[NSTableCellView alloc] init];
       cell.identifier = identifier;
@@ -459,8 +575,6 @@ static NSString* GetTablesDirectory()
          [tf.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
       ]];
    }
-
-   VPXTableItem* item = self.filteredTables[row];
 
    if ([identifier isEqualToString:@"name"]) {
       cell.textField.stringValue = item.name;
