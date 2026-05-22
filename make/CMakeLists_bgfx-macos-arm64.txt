@@ -130,6 +130,44 @@ add_custom_command(TARGET vpinball POST_BUILD
    COMMAND /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${CMAKE_PROJECT_VERSION}" $<TARGET_FILE_DIR:vpinball>/../Info.plist
 )
 
+# Quick Look Thumbnail Extension
+add_executable(vpx-quicklook
+   standalone/macos/quicklook/VPXThumbnailProvider.mm
+   third-party/include/pole/pole.cpp
+)
+
+set_source_files_properties(standalone/macos/quicklook/VPXThumbnailProvider.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+
+target_include_directories(vpx-quicklook PRIVATE
+   ${CMAKE_SOURCE_DIR}/third-party/include
+)
+
+target_compile_options(vpx-quicklook PRIVATE -std=c++17)
+
+target_link_options(vpx-quicklook PRIVATE -e _NSExtensionMain)
+
+target_link_libraries(vpx-quicklook PRIVATE
+   "-framework Foundation"
+   "-framework AppKit"
+   "-framework QuickLookThumbnailing"
+)
+
+set_target_properties(vpx-quicklook PROPERTIES
+   RUNTIME_OUTPUT_NAME "VPXQuickLook"
+   MACOSX_BUNDLE YES
+   MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/standalone/macos/quicklook/Info.plist"
+   BUNDLE_EXTENSION "appex"
+   XCODE_PRODUCT_TYPE "com.apple.product-type.app-extension"
+)
+
+add_custom_command(TARGET vpx-quicklook POST_BUILD
+   COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:vpinball>/../PlugIns/VPXQuickLook.appex/Contents/MacOS"
+   COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:vpx-quicklook>" "$<TARGET_FILE_DIR:vpinball>/../PlugIns/VPXQuickLook.appex/Contents/MacOS/VPXQuickLook"
+   COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_SOURCE_DIR}/standalone/macos/quicklook/Info.plist" "$<TARGET_FILE_DIR:vpinball>/../PlugIns/VPXQuickLook.appex/Contents/Info.plist"
+)
+
+add_dependencies(vpinball vpx-quicklook)
+
 set(PluginPlatform "macos")
 set(PluginArch "arm64")
 include("${CMAKE_SOURCE_DIR}/make/CMakeLists_plugins.txt")

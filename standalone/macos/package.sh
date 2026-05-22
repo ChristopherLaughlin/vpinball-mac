@@ -60,6 +60,11 @@ cmd_sign() {
         codesign --force --sign - "$lib"
     done
 
+    # Sign Quick Look extension
+    find "$APP_BUNDLE/Contents/PlugIns" -name "*.appex" 2>/dev/null | while read -r appex; do
+        codesign --force --sign - "$appex"
+    done
+
     # Sign the main executable
     codesign --force --sign - --entitlements /dev/stdin "$APP_BUNDLE" <<'ENTITLEMENTS'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -99,6 +104,11 @@ cmd_sign_dev() {
 
     find "$APP_BUNDLE/Contents/Resources/plugins" \( -name "*.dylib" -o -name "*.so" -o -name "*.bundle" \) 2>/dev/null | while read -r lib; do
         codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$lib"
+    done
+
+    # Sign Quick Look extension
+    find "$APP_BUNDLE/Contents/PlugIns" -name "*.appex" 2>/dev/null | while read -r appex; do
+        codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$appex"
     done
 
     codesign --force --options runtime --sign "$SIGNING_IDENTITY" \

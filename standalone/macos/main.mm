@@ -108,6 +108,18 @@ static NSString* GetTablesDirectory()
    return [@"~/Documents" stringByExpandingTildeInPath];
 }
 
+static NSString* ReadUTF16Stream(POLE::Storage& storage, const std::string& path)
+{
+   POLE::Stream stream(&storage, path);
+   if (stream.fail() || stream.size() < 2)
+      return nil;
+   std::vector<unsigned char> buf(stream.size());
+   stream.read(buf.data(), stream.size());
+   return [[NSString alloc] initWithBytes:buf.data()
+                                   length:buf.size()
+                                 encoding:NSUTF16LittleEndianStringEncoding];
+}
+
 #pragma mark - Table Library Window
 
 static NSImage* ResizeToThumbnail(NSImage* image)
@@ -167,28 +179,13 @@ static NSImage* ExtractImageFromBIFF(POLE::Storage& storage, const std::string& 
    return nil;
 }
 
-static NSImage* ExtractVPXThumbnail(NSString* vpxPath)
-{
-   POLE::Storage storage([vpxPath UTF8String]);
-   if (!storage.open())
-      return nil;
-
-   NSImage* image = ExtractImageFromStream(storage, "/GameStg/Screenshot");
-
-   for (int i = 0; !image && i < 5; i++) {
-      char path[64];
-      snprintf(path, sizeof(path), "/GameStg/Image%d", i);
-      image = ExtractImageFromBIFF(storage, path);
-   }
-
-   return ResizeToThumbnail(image);
-}
-
 @interface VPXTableItem : NSObject
 @property (nonatomic, copy) NSString* path;
 @property (nonatomic, copy) NSString* name;
 @property (nonatomic, copy) NSString* size;
 @property (nonatomic, copy) NSString* modified;
+@property (nonatomic, copy) NSString* author;
+@property (nonatomic, copy) NSString* version;
 @property (nonatomic, strong) NSImage* thumbnail;
 @end
 
@@ -229,7 +226,7 @@ static NSImage* ExtractVPXThumbnail(NSString* vpxPath)
 
 - (void)createWindow
 {
-   NSRect frame = NSMakeRect(0, 0, 700, 500);
+   NSRect frame = NSMakeRect(0, 0, 850, 500);
    self.window = [[NSWindow alloc] initWithContentRect:frame
                                              styleMask:NSWindowStyleMaskTitled |
                                                        NSWindowStyleMaskClosable |
@@ -304,6 +301,15 @@ static NSImage* ExtractVPXThumbnail(NSString* vpxPath)
                                                                    ascending:YES
                                                                     selector:@selector(localizedCaseInsensitiveCompare:)];
    [self.tableView addTableColumn:nameCol];
+
+   NSTableColumn* authorCol = [[NSTableColumn alloc] initWithIdentifier:@"author"];
+   authorCol.title = @"Author";
+   authorCol.width = 130;
+   authorCol.minWidth = 80;
+   authorCol.sortDescriptorPrototype = [NSSortDescriptor sortDescriptorWithKey:@"author"
+                                                                    ascending:YES
+                                                                     selector:@selector(localizedCaseInsensitiveCompare:)];
+   [self.tableView addTableColumn:authorCol];
 
    NSTableColumn* sizeCol = [[NSTableColumn alloc] initWithIdentifier:@"size"];
    sizeCol.title = @"Size";
@@ -428,27 +434,44 @@ static NSImage* ExtractVPXThumbnail(NSString* vpxPath)
          [self.allTables removeAllObjects];
          [self.allTables addObjectsFromArray:tables];
          [self applyFilter];
-         [self loadThumbnailsInBackground];
+         [self loadMetadataInBackground];
       });
    });
 }
 
-- (void)loadThumbnailsInBackground
+- (void)loadMetadataInBackground
 {
    NSArray<VPXTableItem*>* snapshot = [self.allTables copy];
    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
       for (VPXTableItem* item in snapshot) {
-         NSImage* thumb = ExtractVPXThumbnail(item.path);
-         if (thumb) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-               item.thumbnail = thumb;
-               NSInteger idx = [self.filteredTables indexOfObject:item];
-               if (idx != NSNotFound) {
-                  [self.tableView reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:idx]
-                                           columnIndexes:[NSIndexSet indexSetWithIndex:0]];
-               }
-            });
+         POLE::Storage storage([item.path UTF8String]);
+         if (!storage.open())
+            continue;
+
+         NSString* author = ReadUTF16Stream(storage, "/TableInfo/AuthorName");
+         NSString* version = ReadUTF16Stream(storage, "/TableInfo/TableVersion");
+         NSString* tableName = ReadUTF16Stream(storage, "/TableInfo/TableName");
+         NSImage* thumb = nil;
+
+         NSImage* image = ExtractImageFromStream(storage, "/GameStg/Screenshot");
+         for (int i = 0; !image && i < 5; i++) {
+            char path[64];
+            snprintf(path, sizeof(path), "/GameStg/Image%d", i);
+            image = ExtractImageFromBIFF(storage, path);
          }
+         thumb = ResizeToThumbnail(image);
+
+         dispatch_async(dispatch_get_main_queue(), ^{
+            if (author.length > 0) item.author = author;
+            if (version.length > 0) item.version = version;
+            if (tableName.length > 0) item.name = tableName;
+            if (thumb) item.thumbnail = thumb;
+            NSInteger idx = [self.filteredTables indexOfObject:item];
+            if (idx != NSNotFound) {
+               [self.tableView reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:idx]
+                                         columnIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, self.tableView.numberOfColumns)]];
+            }
+         });
       }
    });
 }
@@ -462,7 +485,8 @@ static NSImage* ExtractVPXThumbnail(NSString* vpxPath)
       [self.filteredTables addObjectsFromArray:self.allTables];
    } else {
       for (VPXTableItem* item in self.allTables) {
-         if ([item.name rangeOfString:query options:NSCaseInsensitiveSearch].location != NSNotFound)
+         if ([item.name rangeOfString:query options:NSCaseInsensitiveSearch].location != NSNotFound ||
+             (item.author && [item.author rangeOfString:query options:NSCaseInsensitiveSearch].location != NSNotFound))
             [self.filteredTables addObject:item];
       }
    }
@@ -579,7 +603,11 @@ static NSImage* ExtractVPXThumbnail(NSString* vpxPath)
    if ([identifier isEqualToString:@"name"]) {
       cell.textField.stringValue = item.name;
       cell.textField.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-      cell.toolTip = item.path;
+      cell.toolTip = item.version ? [NSString stringWithFormat:@"v%@ — %@", item.version, item.path] : item.path;
+   } else if ([identifier isEqualToString:@"author"]) {
+      cell.textField.stringValue = item.author ?: @"";
+      cell.textField.font = [NSFont systemFontOfSize:11];
+      cell.textField.textColor = [NSColor secondaryLabelColor];
    } else if ([identifier isEqualToString:@"size"]) {
       cell.textField.stringValue = item.size;
       cell.textField.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
