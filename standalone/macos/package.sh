@@ -19,7 +19,7 @@ usage() {
     echo "  sign        Ad-hoc code sign the app bundle"
     echo "  sign-dev    Sign with Developer ID (requires SIGNING_IDENTITY env var)"
     echo "  dmg         Create a DMG installer"
-    echo "  notarize    Submit DMG for Apple notarization (requires APPLE_ID, TEAM_ID, APP_PASSWORD)"
+    echo "  notarize    Submit DMG for Apple notarization (requires NOTARY_PROFILE, or APPLE_ID, TEAM_ID, APP_PASSWORD)"
     echo "  all         Build + sign + dmg"
     echo "  release     Build + sign-dev + dmg + notarize"
     echo ""
@@ -180,8 +180,22 @@ README
 }
 
 cmd_notarize() {
-    if [ -z "${APPLE_ID:-}" ] || [ -z "${TEAM_ID:-}" ] || [ -z "${APP_PASSWORD:-}" ]; then
-        echo "Error: Set APPLE_ID, TEAM_ID, and APP_PASSWORD environment variables"
+    # Preferred: credentials stored in the keychain, so no secret appears on the
+    # command line. Create the profile once with:
+    #   xcrun notarytool store-credentials "<profile>" --apple-id ... --team-id ...
+    # (notarytool prompts for the app-specific password), then set NOTARY_PROFILE.
+    #
+    # Fallback: APPLE_ID / TEAM_ID / APP_PASSWORD env vars. Note this passes the
+    # app-specific password as a notarytool argument, which is visible to other
+    # local processes (e.g. via ps) while the command runs.
+    local -a notary_auth
+    if [ -n "${NOTARY_PROFILE:-}" ]; then
+        notary_auth=(--keychain-profile "$NOTARY_PROFILE")
+    elif [ -n "${APPLE_ID:-}" ] && [ -n "${TEAM_ID:-}" ] && [ -n "${APP_PASSWORD:-}" ]; then
+        notary_auth=(--apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD")
+    else
+        echo "Error: Set NOTARY_PROFILE (preferred), or APPLE_ID, TEAM_ID, and APP_PASSWORD"
+        echo "  NOTARY_PROFILE - Keychain profile from 'xcrun notarytool store-credentials'"
         echo "  APPLE_ID      - Your Apple ID email"
         echo "  TEAM_ID       - Your Team ID"
         echo "  APP_PASSWORD  - App-specific password from appleid.apple.com"
@@ -196,9 +210,7 @@ cmd_notarize() {
     echo "==> Submitting for notarization..."
     local notarize_output
     notarize_output=$(xcrun notarytool submit "$DMG_PATH" \
-        --apple-id "$APPLE_ID" \
-        --team-id "$TEAM_ID" \
-        --password "$APP_PASSWORD" \
+        "${notary_auth[@]}" \
         --wait 2>&1)
     echo "$notarize_output"
 
@@ -208,10 +220,7 @@ cmd_notarize() {
         submission_id=$(echo "$notarize_output" | grep -oE 'id: [0-9a-f-]+' | head -1 | cut -d' ' -f2)
         if [ -n "$submission_id" ]; then
             echo "==> Fetching notarization log..."
-            xcrun notarytool log "$submission_id" \
-                --apple-id "$APPLE_ID" \
-                --team-id "$TEAM_ID" \
-                --password "$APP_PASSWORD"
+            xcrun notarytool log "$submission_id" "${notary_auth[@]}"
         fi
         exit 1
     fi
