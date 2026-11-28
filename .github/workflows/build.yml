@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [master]
 
+# Least privilege by default; only the release job below gets write access.
+permissions:
+  contents: read
+
 jobs:
   build-macos-arm64:
     runs-on: macos-14
@@ -61,9 +65,31 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: standalone/macos/package.sh dmg
 
-      - name: Create GitHub Release
+      - name: Upload DMG
         if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: VPinballX-macOS-dmg
+          path: build/VPinballX-*-macOS.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    # Publishing is the only step that needs write access, and only on tag pushes.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build-macos-arm64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: VPinballX-macOS-dmg
+          path: dist
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: build/VPinballX-*-macOS.dmg
+          files: dist/VPinballX-*-macOS.dmg
           generate_release_notes: true
